@@ -1,0 +1,153 @@
+from django.contrib import admin
+from django.urls import path, include, re_path
+from django.conf import settings
+from django.conf.urls.static import static
+from django.http import JsonResponse, HttpResponse, FileResponse, Http404
+from django.utils import timezone
+from django.views.generic import RedirectView
+from pathlib import Path
+import os
+
+
+# -------------------------
+# HEALTH CHECK
+# -------------------------
+def health_check(request):
+    return JsonResponse({
+        "project": "Ojasritu Wellness",
+        "status": "Backend running successfully",
+        "timestamp": timezone.now().isoformat()
+    })
+
+# -------------------------
+# FRONTEND SPA SERVE
+# -------------------------
+def serve_frontend(request):
+    base = Path(settings.BASE_DIR)
+    candidates = [
+        base / "staticfiles" / "index.html",
+        base / "frontend" / "dist" / "index.html",
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                return HttpResponse(p.read_text(encoding="utf-8"), content_type="text/html")
+            except Exception:
+                continue
+    # Fallback to shop web pages if SPA not present
+    return RedirectView.as_view(url="/", permanent=False)(request)
+
+# -------------------------
+# MEDIA FILE SERVE (PRODUCTION)
+# -------------------------
+def serve_media(request, path):
+    """Serve media files in all environments"""
+    media_root = Path(settings.MEDIA_ROOT)
+    file_path = media_root / path
+    
+    # Security: prevent directory traversal
+    try:
+        file_path = file_path.resolve()
+        media_root = media_root.resolve()
+        if not str(file_path).startswith(str(media_root)):
+            raise Http404("Invalid path")
+    except:
+        raise Http404("Invalid path")
+    
+    if file_path.exists() and file_path.is_file():
+        # Set proper content type
+        import mimetypes
+        content_type, _ = mimetypes.guess_type(str(file_path))
+        response = FileResponse(open(file_path, 'rb'), content_type=content_type)
+        # Add CORS headers for images
+        response['Access-Control-Allow-Origin'] = '*'
+        response['Cache-Control'] = 'public, max-age=31536000'
+        return response
+    raise Http404("Media file not found")
+
+
+# -------------------------
+# GOOGLE OAUTH SUCCESS HANDLER
+# -------------------------
+def google_oauth_popup_close(request):
+    """Handle Google OAuth callback for redirect-based flow.
+
+    Django Allauth manages the entire OAuth process via server-side redirects.
+    After successful authentication, redirect to the frontend callback handler.
+    The React GoogleAuthCallback page will detect the session via /api/auth/check/
+    and refresh the cart automatically.
+    """
+    from django.shortcuts import redirect
+    # Redirect to frontend callback page instead of directly to home
+    # This allows the frontend to detect the new session and refresh cart
+    return redirect('/oauth/complete/google-oauth2/')
+
+
+# ===== POLICY PAGE VIEWS =====
+from shop.views import shipping_policy, terms_and_conditions, cancellation_refund_policy, privacy_policy
+
+
+urlpatterns = [
+    # =========================
+    # ADMIN PANEL
+    # =========================
+    path("admin/", admin.site.urls),
+
+    # =========================
+    # DJANGO ALLAUTH (Google OAuth internal)
+    # =========================
+    path("accounts/profile/", RedirectView.as_view(url="/", permanent=False)),
+    path("auth-success/", google_oauth_popup_close, name="auth_success"),
+    path("accounts/", include("allauth.urls")),
+    # Google OAuth callback overrides (close popup and notify opener)
+    path("oauth/complete/google-oauth2/", google_oauth_popup_close, name="google_oauth_complete"),
+    path("accounts/google/login/callback/", google_oauth_popup_close, name="google_login_callback"),
+
+    # =========================
+    # POLICY PAGES (Public URLs for Razorpay)
+    # =========================
+    path("shipping-policy/", shipping_policy, name="shipping_policy"),
+    path("terms-and-conditions/", terms_and_conditions, name="terms_and_conditions"),
+    path("cancellation-refund-policy/", cancellation_refund_policy, name="cancellation_refund_policy"),
+    path("privacy-policy/", privacy_policy, name="privacy_policy"),
+
+    # =========================
+    # API (AUTH + SHOP + PROFILE)
+    # =========================
+    path("api/", include("shop.urls")),
+
+    # =========================
+    # HEALTH CHECK (Railway / Local)
+    # =========================
+    path("healthz/", health_check),
+    path("healthz", health_check),
+
+    # =========================
+    # FAVICON
+    # =========================
+    path("favicon.ico", RedirectView.as_view(url=f"{settings.STATIC_URL}images/logo.svg", permanent=True)),
+    
+    # =========================
+    # MEDIA FILES (PRODUCTION)
+    # =========================
+    re_path(r'^media/(?P<path>.*)$', serve_media, name='media'),
+
+    # =========================
+    # FRONTEND (SPA) - catch-all must be LAST
+    # =========================
+    re_path(r'^.*$', serve_frontend, name='spa'),
+]
+
+# Custom handlers for friendly error pages
+handler404 = 'wellness_project.views.custom_404'
+handler500 = 'wellness_project.views.custom_500'
+
+# =========================
+# MEDIA FILES (DEVELOPMENT)
+# =========================
+# Serve media files in development when DEBUG=True
+if settings.DEBUG:
+    urlpatterns += static(
+        settings.MEDIA_URL,
+        document_root=settings.MEDIA_ROOT
+    )
